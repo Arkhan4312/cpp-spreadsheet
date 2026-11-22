@@ -16,7 +16,7 @@ struct PositionHasher {
 
 class Sheet : public SheetInterface {
 public:
-    ~Sheet() override;
+    ~Sheet() override = default;
 
     void SetCell(Position pos, std::string text) override;
 
@@ -38,11 +38,14 @@ public:
     Cell& GetOrCreateCell(Position pos);
 
 private:
-    void UpdatePrintableSize();
+    void EnsureValid(Position pos) const;
+    void ExpandPrintableSize(Position pos);
+    void RecalculatePrintableSize();
+
     void PrintCells(
         std::ostream& output,
-        const std::function<void(const CellInterface&)>& printCell) const;
-    void EnsureValid(Position pos) const;
+        const std::function<void(const CellInterface&)>& print_cell) const;
+
     std::unordered_map<Position, std::unique_ptr<Cell>, PositionHasher> cells_;
     Size printable_size_;
 };

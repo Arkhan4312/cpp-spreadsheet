@@ -15,19 +15,16 @@
 class Cell::Impl {
 public:
     virtual ~Impl() = default;
-    virtual Value GetValue() const = 0;
+    virtual Value GetValue(const SheetInterface& sheet) const = 0;
     virtual std::string GetText() const = 0;
     virtual std::vector<Position> GetReferencedCells() const {
         return {};
-    }
-    virtual const FormulaInterface* GetFormula() const {
-        return nullptr;
     }
 };
 
 class Cell::EmptyImpl final : public Cell::Impl {
 public:
-    Value GetValue() const override {
+    Value GetValue(const SheetInterface& /*sheet*/) const override {
         return std::string{};
     }
     std::string GetText() const override {
@@ -40,8 +37,8 @@ public:
     explicit TextImpl(std::string text) : text_(std::move(text)) {
     }
 
-    Value GetValue() const override {
-        if (!text_.empty() && text_.front() == ESCAPE_SIGN) {
+    Value GetValue(const SheetInterface& /*sheet*/) const override {
+        if (IsEscaped(text_)) {
             return text_.substr(1);
         }
         return text_;
@@ -61,9 +58,12 @@ public:
         : formula_(std::move(formula)) {
     }
 
-    // Значение формулы считает Cell::ComputeValue через GetFormula()
-    Value GetValue() const override {
-        return FormulaError(FormulaError::Category::Value);
+    Value GetValue(const SheetInterface& sheet) const override {
+        auto result = formula_->Evaluate(sheet);
+        if (auto* number = std::get_if<double>(&result)) {
+            return *number;
+        }
+        return std::get<FormulaError>(result);
     }
 
     std::string GetText() const override {
@@ -72,10 +72,6 @@ public:
 
     std::vector<Position> GetReferencedCells() const override {
         return formula_->GetReferencedCells();
-    }
-
-    const FormulaInterface* GetFormula() const override {
-        return formula_.get();
     }
 
 private:
@@ -87,18 +83,7 @@ private:
 Cell::Cell(Sheet& sheet) : impl_(std::make_unique<EmptyImpl>()), sheet_(sheet) {
 }
 
-Cell::~Cell() {
-    for (const Position& pos : referenced_cells_) {
-        if (Cell* ref = sheet_.GetConcreteCell(pos)) {
-            ref->RemoveDependent(this);
-        }
-    }
-}
-
-void Cell::ResetGraphLinks() {
-    referenced_cells_.clear();
-    dependent_cells_.clear();
-}
+Cell::~Cell() = default;
 
 void Cell::Set(std::string text) {
     if (impl_->GetText() == text) {
@@ -107,7 +92,7 @@ void Cell::Set(std::string text) {
     std::unique_ptr<Impl> new_impl;
     std::vector<Position> new_refs;
 
-    if (text.size() > 1 && text.front() == FORMULA_SIGN) {
+    if (IsFormula(text)) {
         auto formula = ParseFormula(text.substr(1));
         new_refs = formula->GetReferencedCells();
 
@@ -123,14 +108,14 @@ void Cell::Set(std::string text) {
     }
 
     for (const Position& pos : referenced_cells_) {
-        if (Cell* ref = sheet_.GetConcreteCell(pos)) {
-            ref->RemoveDependent(this);
+        if (Cell* referenced = sheet_.GetConcreteCell(pos)) {
+            referenced->RemoveDependent(this);
         }
     }
 
     for (const Position& pos : new_refs) {
-        Cell& ref_cell = sheet_.GetOrCreateCell(pos);
-        ref_cell.AddDependent(this);
+        Cell& referenced = sheet_.GetOrCreateCell(pos);
+        referenced.AddDependent(this);
     }
 
     referenced_cells_ = std::move(new_refs);
@@ -145,7 +130,7 @@ void Cell::Clear() {
 
 CellInterface::Value Cell::GetValue() const {
     if (!cached_value_) {
-        cached_value_ = ComputeValue();
+        cached_value_ = impl_->GetValue(sheet_);
     }
     return *cached_value_;
 }
@@ -158,6 +143,10 @@ std::vector<Position> Cell::GetReferencedCells() const {
     return referenced_cells_;
 }
 
+bool Cell::IsReferenced() const {
+    return !dependent_cells_.empty();
+}
+
 void Cell::AddDependent(Cell* dependent) {
     dependent_cells_.insert(dependent);
 }
@@ -168,8 +157,8 @@ void Cell::RemoveDependent(Cell* dependent) {
 
 void Cell::InvalidateCache() {
     cached_value_.reset();
-    for (Cell* dep : dependent_cells_) {
-        dep->RecursiveInvalidateCache();
+    for (Cell* dependent : dependent_cells_) {
+        dependent->RecursiveInvalidateCache();
     }
 }
 
@@ -178,37 +167,26 @@ void Cell::RecursiveInvalidateCache() {
         return;
     }
     cached_value_.reset();
-    for (Cell* dep : dependent_cells_) {
-        dep->RecursiveInvalidateCache();
+    for (Cell* dependent : dependent_cells_) {
+        dependent->RecursiveInvalidateCache();
     }
-}
-
-CellInterface::Value Cell::ComputeValue() const {
-    if (const FormulaInterface* formula = impl_->GetFormula()) {
-        auto result = formula->Evaluate(sheet_);
-        if (auto* d = std::get_if<double>(&result)) {
-            return *d;
-        }
-        return std::get<FormulaError>(result);
-    }
-    return impl_->GetValue();
 }
 
 bool Cell::HasCycle(const std::vector<Position>& new_refs) const {
     std::unordered_set<Position, PositionHasher> visited;
 
-    std::function<bool(Position)> dfs = [&](Position p) -> bool {
-        Cell* cell = sheet_.GetConcreteCell(p);
+    std::function<bool(Position)> dfs = [&](Position pos) -> bool {
+        Cell* cell = sheet_.GetConcreteCell(pos);
         if (cell == this) {
             return true;
         }
         if (!cell) {
             return false;
         }
-        if (visited.count(p)) {
+        if (visited.count(pos)) {
             return false;
         }
-        visited.insert(p);
+        visited.insert(pos);
 
         for (const Position& next : cell->referenced_cells_) {
             if (dfs(next)) {
@@ -218,10 +196,18 @@ bool Cell::HasCycle(const std::vector<Position>& new_refs) const {
         return false;
     };
 
-    for (const Position& ref : new_refs) {
-        if (dfs(ref)) {
+    for (const Position& referenced : new_refs) {
+        if (dfs(referenced)) {
             return true;
         }
     }
     return false;
+}
+
+bool Cell::IsFormula(const std::string& text) {
+    return text.size() > 1 && text.front() == FORMULA_SIGN;
+}
+
+bool Cell::IsEscaped(const std::string& text) {
+    return !text.empty() && text.front() == ESCAPE_SIGN;
 }

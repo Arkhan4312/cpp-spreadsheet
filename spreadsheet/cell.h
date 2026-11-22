@@ -25,9 +25,8 @@ public:
     std::string GetText() const override;
     std::vector<Position> GetReferencedCells() const override;
 
-    // Обнуляет локальные связи без обращения к другим ячейкам
-    // Вызывается из ~Sheet до уничтожения элементов map
-    void ResetGraphLinks();
+    // true, если на эту ячейку кто-то ссылается
+    bool IsReferenced() const;
 
 private:
     class Impl;
@@ -44,11 +43,12 @@ private:
     // Сброс кэша по рекурсии: ранний выход по пустому кэшу
     void RecursiveInvalidateCache();
 
-    Value ComputeValue() const;
-
     // Проверка цикла: обход от каждой позиции из new_refs по графу
     // зависимостей. Если дошли до ячейки this - есть цикл.
     bool HasCycle(const std::vector<Position>& new_refs) const;
+
+    static bool IsFormula(const std::string& text);
+    static bool IsEscaped(const std::string& text);
 
     std::unique_ptr<Impl> impl_;
     Sheet& sheet_;

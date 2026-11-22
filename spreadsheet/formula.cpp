@@ -26,25 +26,24 @@ public:
                 return 0.0;
             }
             const auto value = cell->GetValue();
-            if (const auto* d = std::get_if<double>(&value)) {
-                return *d;
+            if (const auto* number = std::get_if<double>(&value)) {
+                return *number;
             }
-            if (const auto* s = std::get_if<std::string>(&value)) {
-                if (s->empty()) {
+            if (const auto* text = std::get_if<std::string>(&value)) {
+                if (text->empty()) {
                     return 0.0;
                 }
-                std::size_t idx = 0;
+                std::size_t parsed = 0;
+                double result = 0.0;
                 try {
-                    double result = std::stod(*s, &idx);
-                    if (idx != s->size()) {
-                        throw FormulaError(FormulaError::Category::Value);
-                    }
-                    return result;
-                } catch (const FormulaError&) {
-                    throw;
+                    result = std::stod(*text, &parsed);
                 } catch (...) {
                     throw FormulaError(FormulaError::Category::Value);
                 }
+                if (parsed != text->size()) {
+                    throw FormulaError(FormulaError::Category::Value);
+                }
+                return result;
             }
             throw std::get<FormulaError>(value);
         };
@@ -82,12 +81,7 @@ private:
 std::unique_ptr<FormulaInterface> ParseFormula(std::string expression) {
     try {
         return std::make_unique<Formula>(std::move(expression));
-    } catch (const FormulaException&) {
-        throw;
-    } catch (const ParsingError& e) {
-        throw FormulaException(e.what());
     } catch (const std::exception& e) {
-        // ANTLR
         throw FormulaException(e.what());
     } catch (...) {
         throw FormulaException("Invalid formula");
